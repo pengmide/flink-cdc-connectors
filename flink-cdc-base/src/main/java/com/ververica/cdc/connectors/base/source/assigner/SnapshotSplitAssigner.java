@@ -168,13 +168,16 @@ public class SnapshotSplitAssigner<C extends SourceConfig> implements SplitAssig
             Iterator<SchemalessSnapshotSplit> iterator = remainingSplits.iterator();
             SchemalessSnapshotSplit split = iterator.next();
             iterator.remove();
+            // 已分配的切片存储到 assignedSplits 集合
             assignedSplits.put(split.splitId(), split);
             return Optional.of(split.toSnapshotSplit(tableSchemas.get(split.getTableId())));
         } else {
             // it's turn for new table
+            // 初始化阶段 remainingTables 存储了要读取的表名
             TableId nextTable = remainingTables.pollFirst();
             if (nextTable != null) {
                 // split the given table into chunks (snapshot splits)
+                // 初始化阶段创建了 ChunkSplitter，调用generateSplits 进行切片划分
                 Collection<SnapshotSplit> splits = chunkSplitter.generateSplits(nextTable);
                 final Map<TableId, TableChanges.TableChange> tableSchema = new HashMap<>();
                 if (!splits.isEmpty()) {
@@ -184,8 +187,10 @@ public class SnapshotSplitAssigner<C extends SourceConfig> implements SplitAssig
                         splits.stream()
                                 .map(SnapshotSplit::toSchemalessSnapshotSplit)
                                 .collect(Collectors.toList());
+                // 保留所有切片信息
                 remainingSplits.addAll(schemalessSnapshotSplits);
                 tableSchemas.putAll(tableSchema);
+                // 已经完成分片的 Table
                 alreadyProcessedTables.add(nextTable);
                 return getNext();
             } else {

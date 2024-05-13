@@ -68,17 +68,23 @@ public class MySqlSplitReader implements SplitReader<SourceRecords, MySqlSplit> 
     @Override
     public RecordsWithSplitIds<SourceRecords> fetch() throws IOException {
 
+        // 执行fetch的时候提前检查一下currentReader,并根据不同的split创建不同的对应的reader,binlog/snapshot
+        // 在这个方法中最主要的是调用了submitSplit开始读取数据的一个流程
         checkSplitOrStartNext();
         checkNeedStopBinlogReader();
 
         Iterator<SourceRecords> dataIt;
         try {
+            // 调用具体的debeziumReader执行任务
+            // 在reader中会调用StatefulTaskContext的queue的poll方法拉取数据,该方法会阻塞(也可以根据时间阻塞),
+            // 如果时间间隔内没有返回数据则被中断,抛出InterruptedException
             dataIt = currentReader.pollSplitRecords();
         } catch (InterruptedException e) {
             LOG.warn("fetch data failed.", e);
             throw new IOException(e);
         }
         return dataIt == null
+                // 如果没有读取到数据则返回一个空的,该方法执行后会将currentSplitId置位null,表示已经该split执行完成
                 ? finishedSnapshotSplit()
                 : MySqlRecords.forRecords(currentSplitId, dataIt);
     }
@@ -156,6 +162,8 @@ public class MySqlSplitReader implements SplitReader<SourceRecords, MySqlSplit> 
                 currentReader = new BinlogSplitReader(statefulTaskContext, subtaskId);
                 LOG.info("BinlogSplitReader is created.");
             }
+            // 提交一个split到reader,reader会在在submitSplit方法创建ReadTask对象,进行读取数据,
+            // 将数据放入StatefulTaskContext的queue中,readTask放入线程池执行任务
             currentReader.submitSplit(nextSplit);
         }
     }

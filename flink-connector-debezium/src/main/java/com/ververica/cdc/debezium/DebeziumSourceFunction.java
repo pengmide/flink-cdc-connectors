@@ -152,6 +152,8 @@ public class DebeziumSourceFunction<T> extends RichSourceFunction<T>
 
     // ---------------------------------------------------------------------------------------
     // State
+    // 主要用于状态的维护,当任务出现[问题重启]/[手动重启]后
+    // 维护的一些schema(record中的结构)、未消费的records(在queue中,后面会看到) 、offset等信息
     // ---------------------------------------------------------------------------------------
 
     /**
@@ -180,6 +182,7 @@ public class DebeziumSourceFunction<T> extends RichSourceFunction<T>
     // ---------------------------------------------------------------------------------------
 
     private transient ExecutorService executor;
+    // 一个单线程的线程池,debeziumEngine(一个runnable的实现类)用于读取binlog数据
     private transient DebeziumEngine<?> engine;
     /**
      * Unique name of this Debezium Engine instance across all the jobs. Currently we randomly
@@ -187,12 +190,15 @@ public class DebeziumSourceFunction<T> extends RichSourceFunction<T>
      */
     private transient String engineInstanceName;
 
+    // 一个consumer,用于从engine中读取数据的消费者,并将数据放入handover中
     /** Consume the events from the engine and commit the offset to the engine. */
     private transient DebeziumChangeConsumer changeConsumer;
 
+    // 用于从handover中拿取数据
     /** The consumer to fetch records from {@link Handover}. */
     private transient DebeziumChangeFetcher<T> debeziumChangeFetcher;
 
+    // 两个线程(source,engine)之间交互数据的一个桥梁
     /** Buffer the events from the source and record the errors from the debezium. */
     private transient Handover handover;
 
@@ -361,8 +367,10 @@ public class DebeziumSourceFunction<T> extends RichSourceFunction<T>
         }
     }
 
+    // [重点方法], 其他方法主要用于容错相关
     @Override
     public void run(SourceContext<T> sourceContext) throws Exception {
+        // 用于engine执行的一些相关参数,不是重点内容,如果感兴趣可官网看看说明
         properties.setProperty("name", "engine");
         properties.setProperty("offset.storage", FlinkOffsetBackingStore.class.getCanonicalName());
         if (restoredOffsetState != null) {
@@ -402,11 +410,15 @@ public class DebeziumSourceFunction<T> extends RichSourceFunction<T>
                         dbzHeartbeatPrefix,
                         handover);
 
+        // 创建并配置engine相关参数
         // create the engine with this configuration ...
         this.engine =
                 DebeziumEngine.create(Connect.class)
+                        // 参数
                         .using(properties)
+                        // 配置consumer消费engine读取的数据(binlog/历史数据)
                         .notifying(changeConsumer)
+                        // offset的提交策略
                         .using(OffsetCommitPolicy.always())
                         .using(
                                 (success, message, error) -> {
@@ -419,10 +431,12 @@ public class DebeziumSourceFunction<T> extends RichSourceFunction<T>
                                 })
                         .build();
 
+        // 将engine任务提交到线程池中执行
         // run the engine asynchronously
         executor.execute(engine);
         debeziumStarted = true;
 
+        // metrics相关配置
         // initialize metrics
         // make RuntimeContext#getMetricGroup compatible between Flink 1.13 and Flink 1.14
         final Method getMetricGroupMethod =
@@ -440,6 +454,7 @@ public class DebeziumSourceFunction<T> extends RichSourceFunction<T>
         metricGroup.gauge(
                 "sourceIdleTime", (Gauge<Long>) () -> debeziumChangeFetcher.getIdleTime());
 
+        // 启动fetcher,循环去hanover中拿取最新数据发送下游
         // start the real debezium consumer
         debeziumChangeFetcher.runFetchLoop();
     }

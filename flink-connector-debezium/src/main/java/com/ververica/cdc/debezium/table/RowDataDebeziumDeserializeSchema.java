@@ -115,11 +115,17 @@ public final class RowDataDebeziumDeserializeSchema
         this.changelogMode = checkNotNull(changelogMode);
     }
 
+    // 这里主要会判断进来的数据类型,然后根据不同的类型走不同的操作逻辑,
+    // 如果是 update 操作的话,会输出两条数据.最终都是会转换成 RowData 类型输出.
     @Override
     public void deserialize(SourceRecord record, Collector<RowData> out) throws Exception {
+        // 获取 op 类型
         Envelope.Operation op = Envelope.operationFor(record);
+        // 获取数据
         Struct value = (Struct) record.value();
+        // 获取 schema 信息
         Schema valueSchema = record.valueSchema();
+        // 根据 op 的不同类型走不同的操作
         if (op == Envelope.Operation.CREATE || op == Envelope.Operation.READ) {
             GenericRowData insert = extractAfterRow(value, valueSchema);
             validator.validate(insert, RowKind.INSERT);

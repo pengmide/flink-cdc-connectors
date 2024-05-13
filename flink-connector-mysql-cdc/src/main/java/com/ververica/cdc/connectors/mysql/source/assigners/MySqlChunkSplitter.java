@@ -223,6 +223,7 @@ public class MySqlChunkSplitter implements ChunkSplitter {
         }
     }
 
+    // 主键数据类型转换、ChunkRange 包装成MySqlSnapshotSplit
     /** Generates all snapshot splits (chunks) from chunk ranges. */
     private List<MySqlSnapshotSplit> generateSplits(TableId tableId, List<ChunkRange> chunks) {
         // convert chunks into splits
@@ -259,6 +260,7 @@ public class MySqlChunkSplitter implements ChunkSplitter {
         // do nothing
     }
 
+    // 根据拆分列的最小值和最大值将表拆分为大小均匀的块，并以 {@link #chunkSize} 步长滚动块。
     /**
      * Split table into evenly sized chunks based on the numeric min and max value of split column,
      * and tumble chunks in step size.

@@ -85,10 +85,13 @@ public class MySqlBinlogSplitReadTask extends MySqlStreamingChangeEventSource {
         if (!eventFilter.test(event)) {
             return;
         }
+        // 事件下发 队列
         super.handleEvent(offsetContext, event);
+        // 全量读取阶段需要终止Binlog读取
         // check do we need to stop for read binlog for snapshot split.
         if (isBoundedRead()) {
             final BinlogOffset currentBinlogOffset = getBinlogPosition(offsetContext.getOffset());
+            // HW 停止读取
             // reach the high watermark, the binlog reader should finished
             if (currentBinlogOffset.isAtOrAfter(binlogSplit.getEndingOffset())) {
                 // send binlog end event
@@ -102,6 +105,7 @@ public class MySqlBinlogSplitReadTask extends MySqlStreamingChangeEventSource {
                     errorHandler.setProducerThrowable(
                             new DebeziumException("Error processing binlog signal event", e));
                 }
+                // 终止binlog读取
                 // tell reader the binlog task finished
                 ((SnapshotBinlogSplitChangeEventSourceContextImpl) context).finished();
             }

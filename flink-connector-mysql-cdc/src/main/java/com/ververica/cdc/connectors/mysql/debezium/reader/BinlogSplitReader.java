@@ -97,6 +97,9 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
         this.pureBinlogPhaseTables = new HashSet<>();
     }
 
+    // 创建readTask读取指定split的数据,结果会放入StatefulTaskContext的queue中
+    // 在fetch方法会先提交split,让其执行read数据,然后通过pollSplitRecords方法在调用queue.poll拉取数据
+    // pollSplitRecords这是一个阻塞的操作,如果超时则抛出中断异常
     public void submitSplit(MySqlSplit mySqlSplit) {
         this.currentBinlogSplit = mySqlSplit.asBinlogSplit();
         configureFilter();
@@ -149,6 +152,8 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
         return currentBinlogSplit == null || !currentTaskRunning;
     }
 
+    // 对队列中的原始数据进行修正，保障数据一致性。增量阶段的Binlog读取是无界的，数据会全部下发到事件队列，
+    // BinlogSplitReader 通过shouldEmit（）判断数据是否下发。
     @Nullable
     @Override
     public Iterator<SourceRecords> pollSplitRecords() throws InterruptedException {
@@ -204,6 +209,9 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
         }
     }
 
+    // 事件下发条件:
+    // 1. 新收到的event post 大于 maxwm
+    // 2. 当前 data值所属某个snapshot spilt & 偏移量大于 HWM,下发数据
     /**
      * Returns the record should emit or not.
      *
@@ -223,6 +231,7 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
         if (isDataChangeRecord(sourceRecord)) {
             TableId tableId = getTableId(sourceRecord);
             BinlogOffset position = getBinlogPosition(sourceRecord);
+            // 新收到的event post 大于 max wm ,直接下发
             if (hasEnterPureBinlogPhase(tableId, position)) {
                 return true;
             }
@@ -238,6 +247,7 @@ public class BinlogSplitReader implements DebeziumReader<SourceRecords, MySqlSpl
                                 sourceRecord,
                                 statefulTaskContext.getSchemaNameAdjuster());
                 for (FinishedSnapshotSplitInfo splitInfo : finishedSplitsInfo.get(tableId)) {
+                    // 当前 data值所属某个snapshot spilt &  偏移量大于 HWM,下发数据
                     if (RecordUtils.splitKeyRangeContains(
                                     key, splitInfo.getSplitStart(), splitInfo.getSplitEnd())
                             && position.isAfter(splitInfo.getHighWatermark())) {

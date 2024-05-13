@@ -58,10 +58,17 @@ import static com.ververica.cdc.connectors.mysql.source.assigners.AssignerStatus
 import static com.ververica.cdc.connectors.mysql.source.assigners.AssignerStatus.isAssigningFinished;
 import static com.ververica.cdc.connectors.mysql.source.assigners.AssignerStatus.isSuspended;
 
+// splitEnumerator的作用:
+// 1. 处理sourceReader的split请求
+// 2. 将split分配给sourceReader
+//
+// MySqlSourceReader 启动时会向 MySqlSourceEnumerator 发送请求 RequestSplitEvent 事件，根据返回的切片范围读取区间数据
 /**
+ *
  * A MySQL CDC source enumerator that enumerates receive the split request and assign the split to
  * source readers.
  */
+// 继承SplitEnumerator,并重写其方法
 @Internal
 public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, PendingSplitsState> {
     private static final Logger LOG = LoggerFactory.getLogger(MySqlSourceEnumerator.class);
@@ -80,6 +87,8 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
             SplitEnumeratorContext<MySqlSplit> context,
             MySqlSourceConfig sourceConfig,
             MySqlSplitAssigner splitAssigner) {
+
+        // source.createEnumerator传入的context对象
         this.context = context;
         this.sourceConfig = sourceConfig;
         this.splitAssigner = splitAssigner;
@@ -96,8 +105,10 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
 
     @Override
     public void start() {
+        // 调用splitAssigner的open方法,可以具体看看每个splitAssigner的实现
         splitAssigner.open();
         suspendBinlogReaderIfNeed();
+        // 注册一个Callable,定期调用,主要的作用就是当reader出现通信失败或者故障重启之后,检查是否有错过的通知时间,不是终点
         wakeupBinlogReaderIfNeed();
         this.context.callAsync(
                 this::getRegisteredReader,
@@ -106,6 +117,7 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
                 CHECK_EVENT_INTERVAL);
     }
 
+    // 处理split的请求,当有具体subtask id的reader调用SourceReaderContext.sendSplitRequest()方法时，将调用此方法。
     @Override
     public void handleSplitRequest(int subtaskId, @Nullable String requesterHostname) {
         if (!context.registeredReaders().containsKey(subtaskId)) {
@@ -113,10 +125,14 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
             return;
         }
 
+        // 将请求的taskId放入等待列表
+        // 将reader所属的subtaskId存储到TreeSet, 在处理binlog split时优先分配个task-0
         readersAwaitingSplit.add(subtaskId);
+        // 对等待列表的subtask进行分配
         assignSplits();
     }
 
+    // 将split添加至splitEnumerator,只有在最后一个成功的checkpoint之后,分配的spilt才会出现此情况,说明需要重新处理.
     @Override
     public void addSplitsBack(List<MySqlSplit> splits, int subtaskId) {
         LOG.debug("MySQL Source Enumerator adds splits back: {}", splits);
@@ -132,8 +148,10 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
         }
     }
 
+    // 处理sourceReader的自定义event
     @Override
     public void handleSourceEvent(int subtaskId, SourceEvent sourceEvent) {
+        // sourceReader发送给splitEnumerator的SourceEvent通知snapshot的split已经读取完成,binlog的位置是一致的
         if (sourceEvent instanceof FinishedSnapshotSplitsReportEvent) {
             LOG.info(
                     "The enumerator receives finished split offsets {} from subtask {}.",
@@ -143,18 +161,22 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
                     (FinishedSnapshotSplitsReportEvent) sourceEvent;
             Map<String, BinlogOffset> finishedOffsets = reportEvent.getFinishedOffsets();
 
+            // 上面splitAssigner介绍过
             splitAssigner.onFinishedSplits(finishedOffsets);
 
             wakeupBinlogReaderIfNeed();
 
+            // 返回ACK事件返回给reader的表示已经确认了snapshot
             // send acknowledge event
             FinishedSnapshotSplitsAckEvent ackEvent =
                     new FinishedSnapshotSplitsAckEvent(new ArrayList<>(finishedOffsets.keySet()));
             context.sendEventToSourceReader(subtaskId, ackEvent);
+        // sourceReader发送给splitEnumerator的SourceEvent用来拉取binlog元数据，也就是发送BinlogSplitMetaEvent
         } else if (sourceEvent instanceof BinlogSplitMetaRequestEvent) {
             LOG.debug(
                     "The enumerator receives request for binlog split meta from subtask {}.",
                     subtaskId);
+            // 发送binlog meta
             sendBinlogMeta(subtaskId, (BinlogSplitMetaRequestEvent) sourceEvent);
         } else if (sourceEvent instanceof SuspendBinlogReaderAckEvent) {
             LOG.info(
@@ -186,11 +208,14 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
 
     // ------------------------------------------------------------------------------------------
 
+    // 为等待列表的subtask分配切片
     private void assignSplits() {
+        // treeSet返回的iter是排好序的,即按照subtask id顺序依次处理
         final Iterator<Integer> awaitingReader = readersAwaitingSplit.iterator();
 
         while (awaitingReader.hasNext()) {
             int nextAwaiting = awaitingReader.next();
+            // 如果reader再次请求的split在此期间失败，则将其从等待列表中删除
             // if the reader that requested another split has failed in the meantime, remove
             // it from the list of waiting readers
             if (!context.registeredReaders().containsKey(nextAwaiting)) {
@@ -198,13 +223,17 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
                 continue;
             }
 
+            // 由 MySqlSplitAssigner 分配切片
             Optional<MySqlSplit> split = splitAssigner.getNext();
             if (split.isPresent()) {
                 final MySqlSplit mySqlSplit = split.get();
+                // 为subtask分配split
+                // 发送AddSplitEvent, 为 Reader 返回切片信息
                 context.assignSplit(mySqlSplit, nextAwaiting);
                 awaitingReader.remove();
                 LOG.info("Assign split {} to subtask {}", mySqlSplit, nextAwaiting);
             } else {
+                // 前面splitAssigner中会分配空值,在这里被过滤掉
                 // there is no available splits by now, skip assigning
                 wakeupBinlogReaderIfNeed();
                 break;
@@ -218,6 +247,7 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
                 .toArray();
     }
 
+    // 启动周期调度线程, 要求 SourceReader 向 SourceEnumerator 发送已完成但未发送ACK事件的切片信息
     private void syncWithReaders(int[] subtaskIds, Throwable t) {
         if (t != null) {
             throw new FlinkRuntimeException("Failed to list obtain registered readers due to:", t);
@@ -256,7 +286,9 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
         }
     }
 
+    // 发送给binlog meta event到reader
     private void sendBinlogMeta(int subTask, BinlogSplitMetaRequestEvent requestEvent) {
+        // 如果binlog meta ==null 则进行meta的初始化操作
         // initialize once
         if (binlogSplitMeta == null) {
             final List<FinishedSnapshotSplitInfo> finishedSnapshotSplitInfos =
@@ -274,6 +306,7 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
         final int requestMetaGroupId = requestEvent.getRequestMetaGroupId();
 
         if (binlogSplitMeta.size() > requestMetaGroupId) {
+            // 获取对应的FinishedSnapshotSplitInfo列表,并将其封序列化,生成meta event
             List<FinishedSnapshotSplitInfo> metaToSend = binlogSplitMeta.get(requestMetaGroupId);
             BinlogSplitMetaEvent metadataEvent =
                     new BinlogSplitMetaEvent(
@@ -282,6 +315,7 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
                             metaToSend.stream()
                                     .map(FinishedSnapshotSplitInfo::serialize)
                                     .collect(Collectors.toList()));
+            // 将生成的meta event 发送给reader
             context.sendEventToSourceReader(subTask, metadataEvent);
         } else {
             LOG.error(

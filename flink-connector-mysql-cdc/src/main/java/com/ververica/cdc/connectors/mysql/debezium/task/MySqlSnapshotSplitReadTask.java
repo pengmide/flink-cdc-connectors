@@ -106,12 +106,14 @@ public class MySqlSnapshotSplitReadTask
         SnapshottingTask snapshottingTask = getSnapshottingTask(previousOffset);
         final SnapshotContext<MySqlOffsetContext> ctx;
         try {
+            // 重新new了一个context对象,比较无用
             ctx = prepare(context);
         } catch (Exception e) {
             LOG.error("Failed to initialize snapshot context.", e);
             throw new RuntimeException(e);
         }
         try {
+            // 上面都是无用代码,这里直接调用了doExecute方法,我们进入该方法看主要逻辑即可
             return doExecute(context, previousOffset, ctx, snapshottingTask);
         } catch (InterruptedException e) {
             LOG.warn("Snapshot was interrupted before completion");
@@ -134,12 +136,15 @@ public class MySqlSnapshotSplitReadTask
                                         MySqlOffsetContext>)
                                 snapshotContext;
         ctx.offset = previousOffset;
+        // 一个dispatcher,用于记录水位线事件,后面会通过该dispatcher发射数据,当然是通过emitter发射了
         final SignalEventDispatcher signalEventDispatcher =
                 new SignalEventDispatcher(
                         previousOffset.getPartition(),
                         topicSelector.topicNameFor(snapshotSplit.getTableId()),
                         dispatcher.getQueue());
 
+        // 其实log输出的日志就已经很清晰了
+        // 记录低水位
         final BinlogOffset lowWatermark = currentBinlogOffset(jdbcConnection);
         LOG.info(
                 "Snapshot step 1 - Determining low watermark {} for split {}",
@@ -151,8 +156,10 @@ public class MySqlSnapshotSplitReadTask
                 snapshotSplit, lowWatermark, SignalEventDispatcher.WatermarkKind.LOW);
 
         LOG.info("Snapshot step 2 - Snapshotting data");
+        // 读取数据(重点)
         createDataEvents(ctx, snapshotSplit.getTableId());
 
+        // 记录高水位
         final BinlogOffset highWatermark = currentBinlogOffset(jdbcConnection);
         LOG.info(
                 "Snapshot step 3 - Determining high watermark {} for split {}",
@@ -190,8 +197,15 @@ public class MySqlSnapshotSplitReadTask
             TableId tableId)
             throws Exception {
         LOG.debug("Snapshotting table {}", tableId);
+        // createDataEvents中调用到本类的createDataEventsForTable,也就是开始了具体读取逻辑
         createDataEventsForTable(
                 snapshotContext, snapshotReceiver, databaseSchema.tableFor(tableId));
+        // receiver的逻辑我们就不看了,我这里介绍一下就好
+        // receiver通过changeRecord方法接收到数据后,通过一个成员变量(bufferedEvent)控制,
+        // 如果!=null加入队列,然后创建一个新的SourceRecord,直到所有的数据读取完成,
+        // 所以说最后一条数据创建成功之后,如果没有新的数据了,则不会调用changeRecord该方法,也就是说成员变量记录了最后一个record.
+        // 这里调用completeSnapshot方法的时候会对bufferedEvent变量进行判断,
+        // 如果不等于null做一些complete相关的工作最后加入队列中,如果不调用该方法,则当前split的snapshot阶段读取的数据少了一条
         snapshotReceiver.completeSnapshot();
     }
 
@@ -205,6 +219,7 @@ public class MySqlSnapshotSplitReadTask
         long exportStart = clock.currentTimeInMillis();
         LOG.info("Exporting data from split '{}' of table {}", snapshotSplit.splitId(), table.id());
 
+        // 构建sql
         final String selectSql =
                 StatementUtils.buildSplitScanQuery(
                         snapshotSplit.getTableId(),
@@ -227,6 +242,7 @@ public class MySqlSnapshotSplitReadTask
                                 snapshotSplit.getSplitEnd(),
                                 snapshotSplit.getSplitKeyType().getFieldCount(),
                                 connectorConfig.getQueryFetchSize());
+                // 对查询出来的数据进行封装成sourceRecord发送下游
                 ResultSet rs = selectStatement.executeQuery()) {
 
             ColumnUtils.ColumnArray columnArray = ColumnUtils.toArray(rs, table);
@@ -251,6 +267,7 @@ public class MySqlSnapshotSplitReadTask
                     snapshotChangeEventSourceMetrics.rowsScanned(table.id(), rows);
                     logTimer = getTableScanLogTimer();
                 }
+                // 这里会将数据放入队列,通过receiver接收数据,然后再将数据放入其队列的一个过程,其实不必深入,就是封装的比较好,难以理解
                 dispatcher.dispatchSnapshotEvent(
                         table.id(),
                         getChangeRecordEmitter(snapshotContext, table.id(), row),

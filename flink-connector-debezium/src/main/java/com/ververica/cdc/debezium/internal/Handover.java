@@ -33,7 +33,10 @@ import java.util.List;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
+// 这个类由两个线程访问,pollNext由debeziumFetcher调用,produce有debeziumConsumer调用
+// 因为涉及多线程的调用,单纯的讲代码可能不容易理解,可以去复习一下java多线程知识内容,或者自己debug一下看看调用流程就比较容易理解了
 /**
+ *
  * The Handover is a utility to hand over data (a buffer of records) and exception from a
  * <i>producer</i> thread to a <i>consumer</i> thread. It effectively behaves like a "size one
  * blocking queue", with some extras around exception reporting, closing, and waking up thread
@@ -45,6 +48,7 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  * <p>The Handover can also be "closed", signalling from one thread to the other that it the thread
  * has terminated.
  */
+// 表示类是线程安全的,这类涉及engine和source线程两个线程操作,内部的实现保证了线程安全
 @ThreadSafe
 @Internal
 public class Handover implements Closeable {
@@ -52,6 +56,7 @@ public class Handover implements Closeable {
     private static final Logger LOG = LoggerFactory.getLogger(Handover.class);
     private final Object lock = new Object();
 
+    // 注解表示该变量受lock的保护, 不是重点
     @GuardedBy("lock")
     private List<ChangeEvent<SourceRecord, SourceRecord>> next;
 
@@ -60,6 +65,7 @@ public class Handover implements Closeable {
 
     private boolean wakeupProducer;
 
+    // debeziumFetcher调用,当没有数据的时候进入wait状态,wait状态的时候cpu是不会调用wait状态的线程,另一个线程就可以占用cpu的全部时间片
     /**
      * Polls the next element from the Handover, possibly blocking until the next element is
      * available. This method behaves similar to polling from a blocking queue.
@@ -72,16 +78,23 @@ public class Handover implements Closeable {
      * @throws Exception Rethrows exceptions from the {@link #reportError(Throwable)} method.
      */
     public List<ChangeEvent<SourceRecord, SourceRecord>> pollNext() throws Exception {
+        // 同步代码块才可以使用wait和notifyAll
+        // 为什么使用这种方式,因为只有两个线程,所以这种方式实现简单,如果线程多可以通过juc的lock去做或者其他方式也可以
         synchronized (lock) {
+            // 没有数据没有异常则持续循环进入wait状态,为了防止虚假唤醒的情况
             while (next == null && error == null) {
                 lock.wait();
             }
             List<ChangeEvent<SourceRecord, SourceRecord>> n = next;
+            // 上面的循环可以退出的时候,说明一定是有数据或者有异常,不存在其他的情况
             if (n != null) {
+                // 将next置为null 下面会根据此条件作为判断条件
                 next = null;
+                // 唤醒其他等待线程,当然只可能是engine线程
                 lock.notifyAll();
                 return n;
             } else {
+                // 将异常抛出,上面方法一定会抛出异常,改代码只是为了去掉编译警告
                 ExceptionUtils.rethrowException(error, error.getMessage());
 
                 // this statement cannot be reached since the above method always throws an
@@ -108,12 +121,14 @@ public class Handover implements Closeable {
         checkNotNull(element);
 
         synchronized (lock) {
+            // next不等一直进入wait状态
             while (next != null && !wakeupProducer) {
                 lock.wait();
             }
 
             wakeupProducer = false;
 
+            // 有异常抛出异常,没异常将接受新数据,并唤醒fetcher线程
             // an error marks this as closed for the producer
             if (error != null) {
                 ExceptionUtils.rethrow(error, error.getMessage());

@@ -28,6 +28,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+// 作用：
+// 1. 创建 ChunkSplitter用来划分切片
+// 2. 筛选出要读的表名称
 /**
  * The {@code MySqlSplitAssigner} is responsible for deciding what split should be processed. It
  * determines split processing order.

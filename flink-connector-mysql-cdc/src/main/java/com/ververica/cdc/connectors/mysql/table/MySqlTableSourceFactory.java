@@ -77,6 +77,8 @@ public class MySqlTableSourceFactory implements DynamicTableSourceFactory {
 
     private static final String IDENTIFIER = "mysql-cdc";
 
+    // 这个方法的主要作用就构造MySQLTableSource对象,
+    // 先会从 DDL 中获取 hostname,username,password 等数据库和表的信息,然后去构建 MySQLTableSource 对象.
     @Override
     public DynamicTableSource createDynamicTableSource(Context context) {
         final FactoryUtil.TableFactoryHelper helper =

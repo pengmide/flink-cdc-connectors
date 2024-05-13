@@ -155,6 +155,9 @@ public class MySqlTableSource implements ScanTableSource, SupportsReadingMetadat
                 .build();
     }
 
+    // 返回一个用于读取数据的运行实例对象
+    // 这个方法里面先获取了 rowType 和 typeInfo 信息,然后构建了一个 DebeziumDeserializationSchema 反序列对象,
+    // 这个对象的作用是把读取到的 SourceRecord 数据类型转换成 Flink 认识的 RowData 类型
     @Override
     public ScanRuntimeProvider getScanRuntimeProvider(ScanContext scanContext) {
         RowType physicalDataType =
